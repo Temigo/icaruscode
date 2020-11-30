@@ -19,8 +19,11 @@
 
 #include "nusimdata/SimulationBase/MCTruth.h"
 #include "larcore/Geometry/Geometry.h"
+#include "lardata/DetectorInfoServices/DetectorPropertiesServiceStandard.h"
 #include "lardataobj/RawData/OpDetWaveform.h"
 #include "lardataobj/RecoBase/OpFlash.h"
+#include "lardataobj/Simulation/SimChannel.h"
+#include "lardataobj/Simulation/SimEnergyDeposit.h"
 #include <TTree.h>
 #include <TFile.h>
 #include <TLorentzVector.h>
@@ -52,7 +55,7 @@ private:
   std::string _mcflash_label;
 	std::string _mctruth_label;
   std::vector<std::string> _flash_label_v;
-
+  std::string _simch_label, _simedep_label;
   // For waveform tree
 
 
@@ -69,6 +72,8 @@ private:
 	double _y;
 	double _z;
 	double _nphotons;
+  double _sed_edep;
+  double _sch_edep;
 
   // Time period to match reco<=>MC (in micro-second)
   double _match_time_min;
@@ -84,13 +89,16 @@ private:
 ICARUSOpFlashAna::ICARUSOpFlashAna(fhicl::ParameterSet const& p)
   : EDAnalyzer{p}, _geotree(nullptr)
 {
-  _output_fname = p.get<std::string>("OutputFileName"        );
+  _output_fname   = p.get<std::string>("OutputFileName"        );
   _mcflash_label  = p.get<std::string>("MCOpFlashProducer"       );
-	_mctruth_label = p.get<std::string>("MCTruthProducer");
+  _mctruth_label  = p.get<std::string>("MCTruthProducer");
   _flash_label_v  = p.get<std::vector<std::string> >("OpFlashProducerList");
   _match_time_min = p.get<double>("MatchTimeStart",0.105); // in micro-seconds
   _match_time_max = p.get<double>("MatchTimeEnd",0.120); // in micro-seconds
-  _match_dt     = _match_time_max - _match_time_min;
+  _match_dt       = _match_time_max - _match_time_min;
+  _simedep_label  = p.get<std::string>("SimEnergyDepositProducer","");
+  _simch_label    = p.get<std::string>("SimChannelProducer","");
+
   assert(_match_dt>0);
 }
 
@@ -113,6 +121,8 @@ void ICARUSOpFlashAna::beginJob()
     flashtree->Branch("y",&_y,"y/D");
     flashtree->Branch("z",&_z,"z/D");
     flashtree->Branch("nphotons",&_nphotons,"nphotons/D");
+    flashtree->Branch("sed_edep",&_sed_edep,"sed_edep/D");
+    flashtree->Branch("sch_edep",&_sch_edep,"sch_edep/D");
     _flashtree_v.push_back(flashtree);
   }
 
@@ -176,6 +186,36 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
 			mctruth_db[particle.T() + _match_time_min] = part_idx; // FIXME assumes mctruth_h->size() == 1 always?
 		}
 	}
+
+  //auto const clockData = art::ServiceHandle<detinfo::DetectorClocksService const>()->DataForJob();
+
+  // get energy deposit
+  _sch_edep = _sed_edep = -1;
+  if(!_simch_label.empty()) {
+    _sch_edep = 0;
+    art::Handle< std::vector<sim::SimChannel> > simch_h;
+    e.getByLabel(_simch_label, simch_h);
+
+    for(auto const& sch : *simch_h) {
+      for(auto const tick_ides : sch.TDCIDEMap()) {
+        //double edep_time = clockData.TPCTick2TrigTime(tick_ides.first);
+        for(auto const& edep : tick_ides.second) {
+          _sch_edep += edep.energy;
+        } 
+      }
+    }
+    // divide by the number of planes
+    _sch_edep /= 3.; // hard-coded 3 planes, better to use geometry!
+  }
+  if(!_simedep_label.empty()) {
+    _sed_edep = 0;
+    art::Handle< std::vector<sim::SimEnergyDeposit> > sed_h;
+    e.getByLabel(_simedep_label, sed_h);
+
+    for(auto const& sed : *sed_h) {
+      _sed_edep += sed.Energy();
+    }
+  }
 
   // get MCOpFlash
   art::Handle< std::vector< recob::OpFlash > > mcflash_h;

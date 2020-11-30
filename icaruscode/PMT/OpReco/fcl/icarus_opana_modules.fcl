@@ -75,19 +75,14 @@ ICARUSOpHitAna: {
     MatchTimeEnd:   0.130
 }
 
-ICARUSOpHitTuple: {
-    module_type:       "ICARUSOpHitTuple"
-    OutputFileName:    "ophittuple.root"
-    OpHitProducerList: ["ophit"]
-    OpDetWaveformProducer: ""
-}
-
 ICARUSOpFlashAna: {
     module_type: "ICARUSOpFlashAna"
     OutputFileName: "opflashana.root"
-    MCOpFlashProducer: "mcflash"
+    MCOpFlashProducer: "mcopflash"
     MCTruthProducer: "generator"
-    OpFlashProducerList: ["cheatflash"]
+    SimEnergyDepositProducer: "largeant:TPCActive"
+    #SimChannelProducer: "largeant"
+    OpFlashProducerList: ["opflash","cheatflash"]
     MatchTimeStart: -1.0
     MatchTimeEnd:    1.0
 }
