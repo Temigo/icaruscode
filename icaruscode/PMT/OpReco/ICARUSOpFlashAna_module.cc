@@ -68,9 +68,9 @@ private:
   double _time_true;
   double _pe_sum_true;
   std::vector<double> _pe_true_v;
-	double _x;
-	double _y;
-	double _z;
+	double _x, _y, _z;
+  int _nutype;
+	double _nux, _nuy, _nuz, _nuenergy;
 	double _nphotons;
   double _sed_edep;
   double _sch_edep;
@@ -120,6 +120,11 @@ void ICARUSOpFlashAna::beginJob()
     flashtree->Branch("x",&_x,"x/D");
     flashtree->Branch("y",&_y,"y/D");
     flashtree->Branch("z",&_z,"z/D");
+    flashtree->Branch("nutype",&_nutype,"nutype/I");
+    flashtree->Branch("nux",&_nux,"nux/D");
+    flashtree->Branch("nuy",&_nuy,"nuy/D");
+    flashtree->Branch("nuz",&_nuz,"nuz/D");
+    flashtree->Branch("nuenergy",&_nuenergy,"nuenergy/D");
     flashtree->Branch("nphotons",&_nphotons,"nphotons/D");
     flashtree->Branch("sed_edep",&_sed_edep,"sed_edep/D");
     flashtree->Branch("sch_edep",&_sch_edep,"sch_edep/D");
@@ -174,6 +179,9 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
   _run   = e.id().run();
 
 	// get MCTruth
+  // Neutrino info
+  _nux = _nuy = _nuz = std::numeric_limits<double>::max();
+  _nuenergy = std::numeric_limits<double>::max();
 	art::Handle< std::vector< simb::MCTruth > > mctruth_h;
 	e.getByLabel(_mctruth_label, mctruth_h);
 	std::map<double, int> mctruth_db;
@@ -185,6 +193,14 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
 			//const TLorentzVector& mom = particle.Momentum();
 			mctruth_db[particle.T() + _match_time_min] = part_idx; // FIXME assumes mctruth_h->size() == 1 always?
 		}
+    if(mctruth.NeutrinoSet()) {
+      auto const& mcnu = mctruth.GetNeutrino().Nu();
+      _nutype   = mcnu.PdgCode();
+      _nux      = mcnu.Position(0).X();
+      _nuy      = mcnu.Position(0).Y();
+      _nuz      = mcnu.Position(0).Z();
+      _nuenergy = mcnu.Momentum(0).T();
+    }
 	}
 
   //auto const clockData = art::ServiceHandle<detinfo::DetectorClocksService const>()->DataForJob();
@@ -274,18 +290,18 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
       _time_true = std::numeric_limits<double>::max();
       _pe_sum_true = -1;
       if(low != mcflash_db.begin()) {
-	--low;
-	// get mc opflash
-	auto const& mcflash = (*mcflash_h).at((*low).second);
-	// Check if this is in the "match" range
-	if( (_time - (*low).first) < _match_dt ) {
-	  _pe_true_v = mcflash.PEs();
-	  _time_true = mcflash.Time();
-	  _pe_sum_true = mcflash.TotalPE();
-	  //_pe_sum_true = std::accumulate(_pe_true_v.begin(),_pe_true_v.end());
-	  mcflash_used[(*low).second] = true;
-		std::cout << mcflash.TotalPE() << " " << std::accumulate(_pe_true_v.begin(), _pe_true_v.end(), 0.) << std::endl;
-	}
+      	--low;
+	      // get mc opflash
+        auto const& mcflash = (*mcflash_h).at((*low).second);
+        // Check if this is in the "match" range
+        if( (_time - (*low).first) < _match_dt ) {
+          _pe_true_v = mcflash.PEs();
+          _time_true = mcflash.Time();
+          _pe_sum_true = mcflash.TotalPE();
+          //_pe_sum_true = std::accumulate(_pe_true_v.begin(),_pe_true_v.end());
+          mcflash_used[(*low).second] = true;
+          std::cout << mcflash.TotalPE() << " " << std::accumulate(_pe_true_v.begin(), _pe_true_v.end(), 0.) << std::endl;
+        }
       }
       flashtree->Fill();
     }
