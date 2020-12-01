@@ -42,6 +42,10 @@ public:
   ICARUSOpFlashAna& operator=(ICARUSOpFlashAna const&) = delete;
   ICARUSOpFlashAna& operator=(ICARUSOpFlashAna&&) = delete;
 
+  // function to analyze the cloest distance to each wall
+  void distance2Wall(const double x, const double y, const double z,
+    int &cryoid, int &tpcid, double &dx, double &dy, double &dz) const;
+
   // Required functions.
   void analyze(art::Event const& e) override;
   void beginJob() override;
@@ -56,8 +60,6 @@ private:
 	std::string _mctruth_label;
   std::vector<std::string> _flash_label_v;
   std::string _simch_label, _simedep_label;
-  // For waveform tree
-
 
   // For flash trees
   int _run, _subrun, _event;
@@ -69,8 +71,17 @@ private:
   double _pe_sum_true;
   std::vector<double> _pe_true_v;
 	double _x, _y, _z;
+  double _dx, _dy, _dz;
+  double _sedx, _sedy, _sedz;
+  double _sed_dx, _sed_dy, _sed_dz;
+  int _sed_cryo, _sed_tpc;
+  double _schx, _schy, _schz;
+  double _sch_dx, _sch_dy, _sch_dz;
+  int _sch_cryo, _sch_tpc;
   int _nutype;
 	double _nux, _nuy, _nuz, _nuenergy;
+  double _nu_dx, _nu_dy, _nu_dz;
+  int _nu_cryo, _nu_tpc;
 	double _nphotons;
   double _sed_edep;
   double _sch_edep;
@@ -83,6 +94,8 @@ private:
   // For geometry info
   TTree *_geotree;
 
+  // A flag to use either TPC or Cryostat boundaries
+  //bool _use_tpc_boundingbox;
 };
 
 
@@ -98,6 +111,7 @@ ICARUSOpFlashAna::ICARUSOpFlashAna(fhicl::ParameterSet const& p)
   _match_dt       = _match_time_max - _match_time_min;
   _simedep_label  = p.get<std::string>("SimEnergyDepositProducer","");
   _simch_label    = p.get<std::string>("SimChannelProducer","");
+  //_use_tpc_boundingbox = p.get<bool>("UseTPCBoundingBox",true);
 
   assert(_match_dt>0);
 }
@@ -121,10 +135,28 @@ void ICARUSOpFlashAna::beginJob()
     flashtree->Branch("x",&_x,"x/D");
     flashtree->Branch("y",&_y,"y/D");
     flashtree->Branch("z",&_z,"z/D");
+    flashtree->Branch("dx",&_dx,"dx/D");
+    flashtree->Branch("dy",&_dy,"dy/D");
+    flashtree->Branch("dz",&_dz,"dz/D");
+    flashtree->Branch("sedx",&_sedx,"sedx/D");
+    flashtree->Branch("sedy",&_sedy,"sedy/D");
+    flashtree->Branch("sedz",&_sedz,"sedz/D");
+    flashtree->Branch("sed_dx",&_sed_dx,"sed_dx/D");
+    flashtree->Branch("sed_dy",&_sed_dy,"sed_dy/D");
+    flashtree->Branch("sed_dz",&_sed_dz,"sed_dz/D");
+    flashtree->Branch("schx",&_schx,"schx/D");
+    flashtree->Branch("schy",&_schy,"schy/D");
+    flashtree->Branch("schz",&_schz,"schz/D");
+    flashtree->Branch("sch_dx",&_sch_dx,"sch_dx/D");
+    flashtree->Branch("sch_dy",&_sch_dy,"sch_dy/D");
+    flashtree->Branch("sch_dz",&_sch_dz,"sch_dz/D");
     flashtree->Branch("nutype",&_nutype,"nutype/I");
     flashtree->Branch("nux",&_nux,"nux/D");
     flashtree->Branch("nuy",&_nuy,"nuy/D");
     flashtree->Branch("nuz",&_nuz,"nuz/D");
+    flashtree->Branch("nu_dx",&_nu_dx,"nu_dx/D");
+    flashtree->Branch("nu_dy",&_nu_dy,"nu_dy/D");
+    flashtree->Branch("nu_dz",&_nu_dz,"nu_dz/D");
     flashtree->Branch("nuenergy",&_nuenergy,"nuenergy/D");
     flashtree->Branch("nphotons",&_nphotons,"nphotons/D");
     flashtree->Branch("sed_edep",&_sed_edep,"sed_edep/D");
@@ -173,6 +205,85 @@ void ICARUSOpFlashAna::endJob()
   if(_f) _f->Close();
 }
 
+
+void ICARUSOpFlashAna::distance2Wall(const double x, const double y, const double z,
+  int& cryoid, int& tpcid, double &dx, double &dy, double &dz) const
+{
+  cryoid = tpcid = -1;
+  dx = dy = dz = std::numeric_limits<double>::max();
+  auto geop = lar::providerFrom<geo::Geometry>();
+  for(size_t cid=0; cid<geop->Ncryostats(); ++cid) {
+    auto const& cryostat = geop->Cryostat(cid);
+
+    /*
+    if(_use_tpc_boundingbox) {
+      for(size_t tid=0; tid<cryostat.NTPC(); ++tid) {
+        auto const& bbox = cryostat.TPC(tid).ActiveBoundingBox();
+        // check the point is within TPC
+        if(x < bbox.MinX() || x > bbox.MaxX() ||
+           y < bbox.MinY() || y > bbox.MaxY() ||
+           z < bbox.MinZ() || z > bbox.MaxZ() )
+          continue;
+        dx = std::min(std::fabs(x - bbox.MinX()),std::fabs(x - bbox.MaxX()));
+        dy = std::min(std::fabs(y - bbox.MinY()),std::fabs(y - bbox.MaxY()));
+        dz = std::min(std::fabs(z - bbox.MinZ()),std::fabs(z - bbox.MaxZ()));
+        cryoid = cid;
+        tpcid  = tid;
+        break;
+      }
+    }else{
+      auto const& bbox = cryostat.Boundaries();
+      // check the point is within TPC
+      if(x < bbox.MinX() || x > bbox.MaxX() ||
+         y < bbox.MinY() || y > bbox.MaxY() ||
+         z < bbox.MinZ() || z > bbox.MaxZ() )
+        continue;
+      dx = std::min(std::fabs(x - bbox.MinX()),std::fabs(x - bbox.MaxX()));
+      dy = std::min(std::fabs(y - bbox.MinY()),std::fabs(y - bbox.MaxY()));
+      dz = std::min(std::fabs(z - bbox.MinZ()),std::fabs(z - bbox.MaxZ()));
+      cryoid = cid;
+    }
+    */
+
+    auto const& bbox = cryostat.Boundaries();
+    // check the point is within TPC
+    if(x < bbox.MinX() || x > bbox.MaxX() ||
+       y < bbox.MinY() || y > bbox.MaxY() ||
+       z < bbox.MinZ() || z > bbox.MaxZ() )
+      continue;
+    cryoid = cid;
+
+    // Loop over PMTs in this cryostat
+    double PMTxyz[3];
+    double min_dist2 = std::numeric_limits<double>::max();
+    double pmtx, pmty, pmtz, dist2;
+    pmtx = pmty = pmtz = std::numeric_limits<double>::max();
+    for(size_t opch=0; opch<geop->NOpChannels(); ++opch) {
+      geop->OpDetGeoFromOpChannel(opch).GetCenter(PMTxyz);
+      if(PMTxyz[0] < bbox.MinX() || PMTxyz[0] > bbox.MaxX() ||
+         PMTxyz[1] < bbox.MinY() || PMTxyz[1] > bbox.MaxY() ||
+         PMTxyz[2] < bbox.MinZ() || PMTxyz[2] > bbox.MaxZ())
+        continue;
+
+      dist2 = pow(PMTxyz[0] - x,2) + pow(PMTxyz[1] - y,2) + pow(PMTxyz[2] - z,2);
+      if(dist2 > min_dist2) continue;
+      min_dist2 = dist2;
+      pmtx=PMTxyz[0];
+      pmty=PMTxyz[1];
+      pmtz=PMTxyz[2];
+    }
+
+    if(pmtx != std::numeric_limits<double>::max()) {
+      bool lowx = std::fabs(x - bbox.MinX()) < std::fabs(bbox.MaxX() - x);
+      if(lowx) { dx = x - pmtx; }
+      else { dx = pmtx - x; }
+      dy = y - pmty;
+      dz = z - pmtz;
+    }
+    if(cryoid >= 0) break;
+  }
+}
+
 void ICARUSOpFlashAna::analyze(art::Event const& e)
 {
 
@@ -201,37 +312,66 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
       _nux      = mcnu.Position(0).X();
       _nuy      = mcnu.Position(0).Y();
       _nuz      = mcnu.Position(0).Z();
-      _nuenergy = mcnu.Momentum(0).T();
+      _nuenergy = mcnu.Momentum(0).T() * 1.e3; // MeV
     }
 	}
+  this->distance2Wall(_nux,_nuy,_nuz,_nu_cryo,_nu_tpc,_nu_dx,_nu_dy,_nu_dz);
 
   //auto const clockData = art::ServiceHandle<detinfo::DetectorClocksService const>()->DataForJob();
 
   // get energy deposit
-  _sch_edep = _sed_edep = -1;
+  _sch_edep = -1;
+  _schx = _schy = _schz = std::numeric_limits<double>::max();
+  _sch_dx = _sch_dy = _sch_dz = std::numeric_limits<double>::max();
   if(!_simch_label.empty()) {
-    _sch_edep = 0;
     art::Handle< std::vector<sim::SimChannel> > simch_h;
     e.getByLabel(_simch_label, simch_h);
-
-    for(auto const& sch : *simch_h) {
-      for(auto const tick_ides : sch.TDCIDEMap()) {
-        //double edep_time = clockData.TPCTick2TrigTime(tick_ides.first);
-        for(auto const& edep : tick_ides.second) {
-          _sch_edep += edep.energy;
+    if(simch_h->size()){
+      _sch_edep = 0;
+      _schx = _schy = _schz = 0.;
+      _sch_dx = _sch_dy = _sch_dz = 0.;
+      for(auto const& sch : *simch_h) {
+        for(auto const tick_ides : sch.TDCIDEMap()) {
+          //double edep_time = clockData.TPCTick2TrigTime(tick_ides.first);
+          for(auto const& edep : tick_ides.second) {
+            _sch_edep += edep.energy;
+            _schx += (edep.x * edep.energy);
+            _schy += (edep.y * edep.energy);
+            _schz += (edep.z * edep.energy);
+          }
         }
       }
+      // Take average position
+      _schx /= _sch_edep;
+      _schy /= _sch_edep;
+      _schz /= _sch_edep;
+      // divide by the number of planes
+      _sch_edep /= 3.; // hard-coded 3 planes, better to use geometry!
+      _sch_dx = _sch_dy = _sch_dz = 0.;
+      this->distance2Wall(_schx,_schy,_schz,_sch_cryo,_sch_tpc,_sch_dx,_sch_dy,_sch_dz);
     }
-    // divide by the number of planes
-    _sch_edep /= 3.; // hard-coded 3 planes, better to use geometry!
   }
+
+  _sed_edep = -1;
+  _sedx = _sedy = _sedz = std::numeric_limits<double>::max();
+  _sed_dx = _sed_dy = _sed_dz = std::numeric_limits<double>::max();
   if(!_simedep_label.empty()) {
-    _sed_edep = 0;
     art::Handle< std::vector<sim::SimEnergyDeposit> > sed_h;
     e.getByLabel(_simedep_label, sed_h);
-
-    for(auto const& sed : *sed_h) {
-      _sed_edep += sed.Energy();
+    if(sed_h->size()) {
+      _sed_edep = 0;
+      _sedx = _sedy = _sedz = 0.;
+      _sed_dx = _sed_dy = _sed_dz = 0.;
+      for(auto const& sed : *sed_h) {
+        _sedx += (sed.X() * sed.Energy());
+        _sedy += (sed.Y() * sed.Energy());
+        _sedz += (sed.Z() * sed.Energy());
+        _sed_edep += sed.Energy();
+      }
+      _sedx /= _sed_edep;
+      _sedy /= _sed_edep;
+      _sedz /= _sed_edep;
+      this->distance2Wall(_sedx,_sedy,_sedz,_sed_cryo,_sed_tpc,_sed_dx,_sed_dy,_sed_dz);
     }
   }
 
