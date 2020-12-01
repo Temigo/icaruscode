@@ -60,7 +60,7 @@ private:
 
 
   // For flash trees
-  int _run, _event;
+  int _run, _subrun, _event;
   std::vector<TTree*> _flashtree_v;
   double _time;
   double _pe_sum;
@@ -110,6 +110,7 @@ void ICARUSOpFlashAna::beginJob()
     std::string name = label + "_flashtree";
     auto flashtree = new TTree(name.c_str(),name.c_str());
     flashtree->Branch("run",&_run,"run/I");
+    flashtree->Branch("subrun",&_subrun,"subrun/I");
     flashtree->Branch("event",&_event,"event/I");
     flashtree->Branch("time",&_time,"time/D");
     flashtree->Branch("pe_v",&_pe_v);
@@ -172,6 +173,7 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
 
   _event = e.id().event();
   _run   = e.id().run();
+	_subrun = e.id().subRun();
 
 	// get MCTruth
 	art::Handle< std::vector< simb::MCTruth > > mctruth_h;
@@ -201,7 +203,7 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
         //double edep_time = clockData.TPCTick2TrigTime(tick_ides.first);
         for(auto const& edep : tick_ides.second) {
           _sch_edep += edep.energy;
-        } 
+        }
       }
     }
     // divide by the number of planes
