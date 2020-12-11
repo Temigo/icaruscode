@@ -14,6 +14,7 @@
 #include "art/Framework/Principal/Run.h"
 #include "art/Framework/Principal/SubRun.h"
 #include "canvas/Utilities/InputTag.h"
+#include "canvas/Persistency/Common/FindManyP.h"
 #include "fhiclcpp/ParameterSet.h"
 #include "messagefacility/MessageLogger/MessageLogger.h"
 
@@ -58,6 +59,9 @@ private:
   // For data product labels
   std::string _mcflash_label;
 	std::string _mctruth_label;
+	std::string _mcparticle_label;
+	bool _use_largeant_truth;
+	bool _use_sed_truth;
   std::vector<std::string> _flash_label_v;
   std::string _simch_label, _simedep_label;
 
@@ -70,6 +74,7 @@ private:
   double _time_true;
   double _pe_sum_true;
   std::vector<double> _pe_true_v;
+	double _matching_time;
 	double _x, _y, _z;
   double _dx, _dy, _dz;
   double _sedx, _sedy, _sedz;
@@ -111,6 +116,9 @@ ICARUSOpFlashAna::ICARUSOpFlashAna(fhicl::ParameterSet const& p)
   _match_dt       = _match_time_max - _match_time_min;
   _simedep_label  = p.get<std::string>("SimEnergyDepositProducer","");
   _simch_label    = p.get<std::string>("SimChannelProducer","");
+	_use_largeant_truth = p.get<bool>("UseLargeantTime", false);
+	_use_sed_truth = p.get<bool>("UseSimEnergyDepositTime", false);
+	_mcparticle_label = p.get<std::string>("MCParticleProducer", "largeant");
   //_use_tpc_boundingbox = p.get<bool>("UseTPCBoundingBox",true);
 
   assert(_match_dt>0);
@@ -132,6 +140,7 @@ void ICARUSOpFlashAna::beginJob()
     flashtree->Branch("pe_true_v",&_pe_true_v);
     flashtree->Branch("pe_sum",&_pe_sum,"pe_sum/D");
     flashtree->Branch("pe_sum_true",&_pe_sum_true,"pe_sum_true/D");
+		flashtree->Branch("matching_time", &_matching_time, "matching_time/D");
     flashtree->Branch("x",&_x,"x/D");
     flashtree->Branch("y",&_y,"y/D");
     flashtree->Branch("z",&_z,"z/D");
@@ -291,7 +300,9 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
   _run   = e.id().run();
 	_subrun = e.id().subRun();
 
-	// get MCTruth
+  auto const clockData = art::ServiceHandle<detinfo::DetectorClocksService const>()->DataFor(e);
+
+	// 1. get MCTruth timing
   // Neutrino info
   _nux = _nuy = _nuz = std::numeric_limits<double>::max();
   _nuenergy = std::numeric_limits<double>::max();
@@ -300,12 +311,19 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
 	std::map<double, int> mctruth_db;
 	for (size_t mctruth_index = 0; mctruth_index < mctruth_h->size(); ++mctruth_index) {
 		auto const& mctruth = (*mctruth_h)[mctruth_index];
-		for (int part_idx = 0; part_idx < mctruth.NParticles(); ++part_idx) {
-			const simb::MCParticle & particle = mctruth.GetParticle(part_idx);
-			//const TLorentzVector& pos = particle.Position();
-			//const TLorentzVector& mom = particle.Momentum();
-			mctruth_db[particle.T() + _match_time_min] = part_idx; // FIXME assumes mctruth_h->size() == 1 always?
+
+		// Option 1: Fill using MCTruth>MCParticle timing
+		if (!_use_largeant_truth && !_use_sed_truth) {
+			for (int part_idx = 0; part_idx < mctruth.NParticles(); ++part_idx) {
+				const simb::MCParticle & particle = mctruth.GetParticle(part_idx);
+				if ((int) particle.StatusCode() != 1) continue;
+				//const TLorentzVector& pos = particle.Position();
+				//const TLorentzVector& mom = particle.Momentum();
+				mctruth_db[clockData.G4ToElecTime(particle.T()) - clockData.TriggerTime() + _match_time_min] = part_idx; // FIXME assumes mctruth_h->size() == 1 always?
+				//std::cout << "mctruth_db " << clockData.G4ToElecTime(particle.T()) - clockData.TriggerTime() + _match_time_min << " " << part_idx << " " << particle.T() << std::endl;
+			}
 		}
+
     if(mctruth.NeutrinoSet()) {
       auto const& mcnu = mctruth.GetNeutrino().Nu();
       _nutype   = mcnu.PdgCode();
@@ -317,7 +335,61 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
 	}
   this->distance2Wall(_nux,_nuy,_nuz,_nu_cryo,_nu_tpc,_nu_dx,_nu_dy,_nu_dz);
 
-  //auto const clockData = art::ServiceHandle<detinfo::DetectorClocksService const>()->DataForJob();
+	art::Handle< std::vector< simb::MCParticle > > mcparticle_h;
+	// Option 2: Fill using Largeant MCParticle timing
+	if (_use_largeant_truth) {
+		e.getByLabel(_mcparticle_label, mcparticle_h);
+		for (size_t part_idx = 0; part_idx < mcparticle_h->size(); ++part_idx) {
+			const simb::MCParticle & particle = (*mcparticle_h)[part_idx];
+			//mctruth_db[particle.T() + _match_time_min] = part_idx;
+			auto const& trajectory = particle.Trajectory();
+			double min_T = std::numeric_limits<double>::min();
+			for(size_t traj_idx = 0; traj_idx < trajectory.size(); ++ traj_idx) {
+				if (trajectory.T(traj_idx) < min_T) min_T = trajectory.T(traj_idx);
+			}
+			//std::cout << particle.T() << " " << min_T << std::endl;
+			mctruth_db[clockData.G4ToElecTime(min_T) - clockData.TriggerTime() + _match_time_min] = part_idx;
+		}
+	}
+	// Option 3: Fill using SimEnergyDeposit timing
+	else if (_use_sed_truth) {
+		if(_simedep_label.empty()) std::cout << "Need SimEnergyDepositProducer." << std::endl;
+
+		e.getByLabel(_mcparticle_label, mcparticle_h);
+
+		// Try using SimEnergyDeposit
+		/*art::FindManyP<sim::SimEnergyDeposit> sed(mcparticle_h, e, _mcparticle_label);
+		for (size_t part_idx = 0; part_idx < mcparticle_h->size(); ++part_idx) {
+			auto const& particle = (*mcparticle_h)[part_idx];
+			auto& part_sed = sed.at(part_idx);
+			if (!part_sed.empty()) {
+				std::cout << part_idx << std::endl;
+				double min_T = std::numeric_limits<double>::min();
+				for (size_t sed_idx = 0; sed_idx < part_sed.size(); ++sed_idx) {
+					auto const& simenergydeposit = part_sed.at(sed_idx);
+					if (simenergydeposit->Time() < min_T) min_T = simenergydeposit->Time();
+				}
+				std::cout << particle.T() << " " << min_T << std::endl;
+			}
+		}*/
+    art::Handle< std::vector<sim::SimEnergyDeposit> > sed_h2;
+    e.getByLabel(_simedep_label, sed_h2);
+		std::map<int, double> mcparticle_db;
+    if(sed_h2->size()) {
+			// Create map of TrackID -> minTime across SimEnergyDeposit
+      for(auto const& sed : *sed_h2) {
+				mcparticle_db[sed.TrackID()] = std::min(sed.Time(), mcparticle_db[sed.TrackID()]);
+      }
+			// Use that map to fill mctruth_db
+			for (size_t part_idx = 0; part_idx < mcparticle_h->size(); ++part_idx) {
+				const simb::MCParticle & particle = (*mcparticle_h)[part_idx];
+				double particle_time = clockData.G4ToElecTime(mcparticle_db[particle.TrackId()])- clockData.TriggerTime();
+				mctruth_db[particle_time + _match_time_min] = part_idx;
+				//std::cout << particle.T() << " " << mcparticle_db[particle.TrackId()] << std::endl;
+			}
+		}
+	}
+
 
   // get energy deposit
   _sch_edep = -1;
@@ -386,12 +458,28 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
   // inner map ... key = mcflash timing
   //               value = mcflash location (i.e. array index number)
   std::map<double,int> mcflash_db;
+	std::vector<double> mcflash_timing(mcflash_h->size(),-1.0);
   // fill the map
   //auto const geop = lar::providerFrom<geo::Geometry>();
   for(size_t mcflash_index=0; mcflash_index < mcflash_h->size(); ++mcflash_index) {
     auto const& mcflash = (*mcflash_h)[mcflash_index];
     mcflash_db[mcflash.Time() + _match_time_min] = mcflash_index;
+		// Map to mctruth_db timing, too
+		auto low = mctruth_db.lower_bound((mcflash.Time() + _match_time_min));
+		//std::cout << mcflash_index << mcflash.Time() << std::endl;
+		if (low != mctruth_db.begin()) {
+			//std::cout << mcflash_index << " mcflash_timing " << (*low).first << std::endl;
+			--low;
+			//std::cout << mcflash_index << " mcflash_timing " << (*low).first << " " << ((*low).first - mcflash.Time() - _match_time_min) << std::endl;
+			while(-((*low).first - mcflash.Time() - _match_time_min) > _match_dt && low != mctruth_db.end()) {
+				//std::cout <<"plus plus" << std::endl;
+				++low;
+			}
+			mcflash_timing[mcflash_index] = (*low).first - _match_time_min;
+			//std::cout << mcflash_index << " mcflash_timing " << (*low).first << " " << (*low).second << " " << mcflash.Time() + _match_time_min << " " << _match_dt << std::endl;
+		}
   }
+
   // now fill opflash trees
   for(size_t label_idx=0; label_idx<_flash_label_v.size(); ++label_idx) {
     // Get data product handle
@@ -404,6 +492,9 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
       throw std::exception();
     }
 
+		//
+		// --- Main Loop over Reco OpFlash
+		//
     // keep the record of which mcflash was used (to store un-tagged mcflash at the end)
     std::vector<bool> mcflash_used(mcflash_h->size(),false);
     // now loop over flash, identify mc flash, fill ttree
@@ -412,20 +503,28 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
       _time = flash.Time();
       _pe_v = flash.PEs();
       _pe_sum = flash.TotalPE();//std::accumulate(_pe_v.begin(),_pe_v.end());
-			// search for corresponding mctruth
+
+			// a. search for corresponding mctruth
 			auto low_mct = mctruth_db.lower_bound(_time);
 			if (low_mct != mctruth_db.begin()) {
 				--low_mct;
-				auto const& mctruth = (*mctruth_h).at(0);
-				auto const& particle = mctruth.GetParticle((*low_mct).second);
-				if ( (particle.T() - (*low_mct).first) < _match_dt) {
+				simb::MCParticle particle;
+				if (_use_largeant_truth || _use_sed_truth) {
+					particle = (*mcparticle_h).at((*low_mct).second);
+				}
+				else {
+					auto const& mctruth = (*mctruth_h).at(0);
+					particle = mctruth.GetParticle((*low_mct).second);
+				}
+				if ( (clockData.G4ToElecTime(particle.T()) - clockData.TriggerTime() - (*low_mct).first) < _match_dt) {
 					_nphotons = particle.E();
 					_x = particle.Vx();
 					_y = particle.Vy();
 					_z = particle.Vz();
 				}
 			}
-      // search for corresponding mcflash
+
+      // b. search for corresponding mcflash
       auto low = mcflash_db.lower_bound(_time);
       _pe_true_v.resize(_pe_v.size());
       for(auto& pe : _pe_true_v) pe = 0.;
@@ -440,13 +539,21 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
           _pe_true_v = mcflash.PEs();
           _time_true = mcflash.Time();
           _pe_sum_true = mcflash.TotalPE();
+					_matching_time = mcflash_timing[(*low).second];
           //_pe_sum_true = std::accumulate(_pe_true_v.begin(),_pe_true_v.end());
           mcflash_used[(*low).second] = true;
-          std::cout << mcflash.TotalPE() << " " << std::accumulate(_pe_true_v.begin(), _pe_true_v.end(), 0.) << std::endl;
+          //std::cout << mcflash.TotalPE() << " " << std::accumulate(_pe_true_v.begin(), _pe_true_v.end(), 0.) << std::endl;
         }
       }
+
+			// Record in TTree this OpFlash
       flashtree->Fill();
-    }
+			_matching_time = -1;
+    } // end of OpFlash loop
+
+		//
+		// --- Untagged MCFlash
+		//
     // now fill mcflash info that was not tagged
     for(size_t mcflash_idx=0; mcflash_idx < mcflash_used.size(); ++mcflash_idx) {
       if(mcflash_used[mcflash_idx]) continue;
@@ -455,13 +562,16 @@ void ICARUSOpFlashAna::analyze(art::Event const& e)
       //_pe_sum_true = std::accumulate(_pe_true_v.begin(),_pe_true-v.end());
       _pe_sum_true = mcflash.TotalPE();
       _time_true = mcflash.Time();
+
+			_matching_time = mcflash_timing[mcflash_idx];
       // fill the "reco flash" values with vogus values
       _time = std::numeric_limits<double>::max();
       _pe_v.clear();
       _pe_v.resize(_pe_true_v.size(),0.);
       _pe_sum = -1.;
       flashtree->Fill();
-    }
+			_matching_time = -1;
+    } // end of untagged MCFlash loop
 
   }
 
